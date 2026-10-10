@@ -22,7 +22,7 @@ class ReadingIn(BaseModel):
     gateway_id: str = Field(min_length=1, max_length=200)
     device_id: str = Field(min_length=1, max_length=200)
     metric: str = Field(min_length=1, max_length=200)
-    value: float
+    value: float = Field(allow_inf_nan=False)  # NaN/inf is never real data
     event_time: datetime
     sequence: int = Field(ge=0)
 
@@ -58,6 +58,9 @@ def _stream_fields(r: ReadingIn) -> dict[str, str]:
         "value": str(r.value),
         "event_time": et.isoformat(),
         "sequence": str(r.sequence),
+        # Receive time on the server's clock: the reference the worker uses to
+        # judge whether event_time is implausibly far in the future.
+        "received_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -135,7 +138,8 @@ async def device_detail(device_id: str, request: Request):
         device_id,
     )
     history = await pg.fetch(
-        "SELECT metric, value, event_time, sequence, gateway_id, ingested_at FROM readings"
+        "SELECT metric, value, event_time, sequence, gateway_id, ingested_at, quarantined"
+        " FROM readings"
         " WHERE device_id = $1 ORDER BY event_time DESC LIMIT 50",
         device_id,
     )
@@ -163,6 +167,7 @@ async def device_detail(device_id: str, request: Request):
                 "event_time": h["event_time"].isoformat(),
                 "sequence": h["sequence"],
                 "gateway_id": h["gateway_id"],
+                "quarantined": h["quarantined"],
             }
             for h in history
         ],
@@ -208,12 +213,20 @@ async def stats(request: Request):
         "SELECT (SELECT count(*) FROM devices) AS devices,"
         " (SELECT count(*) FROM readings) AS readings,"
         " (SELECT count(*) FROM late_readings) AS late_readings,"
-        " (SELECT count(*) FROM reading_conflicts) AS reading_conflicts"
+        " (SELECT count(*) FROM reading_conflicts) AS reading_conflicts,"
+        " (SELECT count(*) FROM readings WHERE quarantined) AS quarantined"
     )
+    clock_ahead = [
+        row["gateway_id"]
+        for row in await request.app.state.pg.fetch(
+            "SELECT gateway_id FROM gateway_state WHERE clock_ahead ORDER BY gateway_id"
+        )
+    ]
     return {
         "stream_length": stream_length,
         "pending_entries": pending,
         **dict(counts),
+        "clock_ahead_gateways": clock_ahead,
     }
 
 

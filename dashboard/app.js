@@ -110,6 +110,13 @@ async function refresh() {
     document.getElementById("stat-devices").textContent = stats.devices;
     document.getElementById("stat-late").textContent = stats.late_readings;
     document.getElementById("stat-pending").textContent = stats.pending_entries;
+    document.getElementById("stat-quarantined").textContent = stats.quarantined;
+    const ahead = stats.clock_ahead_gateways ?? [];
+    const banner = document.getElementById("clock-ahead");
+    banner.hidden = ahead.length === 0;
+    banner.textContent = ahead.length
+      ? `Clock ahead — readings quarantined from: ${ahead.join(", ")}`
+      : "";
 
     const unclaimed = devices.filter((d) => d.status === "unclaimed");
     const claimed = devices.filter((d) => d.status === "claimed");

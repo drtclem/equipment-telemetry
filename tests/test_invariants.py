@@ -251,3 +251,61 @@ async def test_state_always_points_at_a_stored_reading(client, pg, r, clean):
         " AND h.gateway_id = s.gateway_id AND h.value = s.value)"
     )
     assert orphans == 0, "state must never show a value that history doesn't have"
+
+
+# Quarantine — a reading stamped far in the future (broken gateway clock) is
+# kept in history but must never become current state, or it would freeze the
+# metric until real time caught up.
+async def test_future_reading_is_quarantined_not_current(client, pg, r, clean):
+    now = datetime.now(UTC)
+    await post(client, reading(value=50.0, event_time=now, sequence=1))
+    await post(client, reading(value=999.0, event_time=datetime(2099, 1, 1, tzinfo=UTC),
+                               sequence=2))
+    await process_batch(pg, r, "test-worker")
+
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 2, "kept, never lost"
+    assert await pg.fetchval("SELECT quarantined FROM readings WHERE value = 999") is True
+    assert await pg.fetchval(
+        "SELECT value FROM device_state WHERE device_id='chiller-2'"
+    ) == 50.0, "a bad clock must not take over current state"
+    st = (await client.get("/stats")).json()
+    assert st["quarantined"] == 1
+    assert st["clock_ahead_gateways"] == ["gw-04"]
+
+    # the gateway's next sane reading updates state and clears the flag
+    await post(client, reading(value=51.0, event_time=datetime.now(UTC), sequence=3))
+    await process_batch(pg, r, "test-worker")
+    assert await pg.fetchval(
+        "SELECT value FROM device_state WHERE device_id='chiller-2'"
+    ) == 51.0
+    assert (await client.get("/stats")).json()["clock_ahead_gateways"] == []
+
+
+# The verdict is judged against RECEIVE time and stored once: a reading that
+# was too far ahead when it arrived stays quarantined even after real time
+# catches up (here, a worker draining it long after it was received).
+async def test_quarantine_is_judged_at_receive_time(pg, clean):
+    received = datetime.now(UTC) - timedelta(hours=1)
+    ahead = received + timedelta(minutes=30)  # 30 min ahead at receipt; past by now
+    async with pg.acquire() as conn:
+        await apply_reading(conn, **reading(value=7.0, event_time=ahead, sequence=1),
+                            received_at=received)
+    assert await pg.fetchval("SELECT quarantined FROM readings") is True
+    assert await pg.fetchval("SELECT count(*) FROM device_state") == 0
+
+
+# Small drift inside the tolerance is honest skew, not a broken clock.
+async def test_small_clock_drift_is_accepted(client, pg, r, clean):
+    await post(client, reading(value=60.0, event_time=datetime.now(UTC) + timedelta(minutes=2)))
+    await process_batch(pg, r, "test-worker")
+    assert await pg.fetchval("SELECT quarantined FROM readings") is False
+    assert await pg.fetchval("SELECT value FROM device_state") == 60.0
+
+
+async def test_nan_and_infinity_rejected(client, r, clean):
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        body = ('{"gateway_id":"g","device_id":"d","metric":"m","value":%s,'
+                '"event_time":"2026-10-09T18:22:03Z","sequence":1}' % bad)
+        resp = await client.post("/ingest/readings", content=body,
+                                 headers={"content-type": "application/json"})
+        assert resp.status_code == 400, f"{bad} must be rejected"

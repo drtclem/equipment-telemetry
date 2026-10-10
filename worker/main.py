@@ -30,7 +30,11 @@ def parse_fields(fields: dict) -> dict:
     et = datetime.fromisoformat(str(fields["event_time"]).replace("Z", "+00:00"))
     if et.tzinfo is None:
         et = et.replace(tzinfo=UTC)
+    received_at = None
+    if fields.get("received_at"):
+        received_at = datetime.fromisoformat(str(fields["received_at"]))
     return {
+        "received_at": received_at,
         "gateway_id": str(fields["gateway_id"]),
         "device_id": str(fields["device_id"]),
         "metric": str(fields["metric"]),

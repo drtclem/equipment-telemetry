@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 
 import asyncpg
 
@@ -29,6 +30,14 @@ WHERE (EXCLUDED.event_time, EXCLUDED.sequence) > (ds.event_time, ds.sequence)
 
 _QUIET_PERIOD = "60 seconds"
 
+# How far ahead of receive time an event_time may be before the reading is
+# quarantined. Honest clock drift is seconds to a couple of minutes; broken
+# clocks are off by hours to decades. This is also the longest a bad clock can
+# freeze a metric (a reading 4 min ahead blocks newer ones for at most 4 min).
+FUTURE_TOLERANCE = dt.timedelta(
+    seconds=int(os.getenv("FUTURE_TOLERANCE_SECONDS", "300"))
+)
+
 
 async def apply_reading(
     conn: asyncpg.Connection,
@@ -39,8 +48,11 @@ async def apply_reading(
     value: float,
     event_time: dt.datetime,
     sequence: int,
+    received_at: dt.datetime | None = None,
 ) -> None:
     """Apply one reading in a single transaction."""
+    received_at = received_at or dt.datetime.now(dt.UTC)
+    quarantined = event_time > received_at + FUTURE_TOLERANCE
     async with conn.transaction():
         # Invariant 3 — a device registers exactly once, even when two gateways
         # first-report it concurrently: the primary key arbitrates.
@@ -57,8 +69,9 @@ async def apply_reading(
         # timestamp is a new reading and is kept. RETURNING tells us whether
         # THIS delivery stored a row.
         inserted = await conn.fetch(
-            "INSERT INTO readings (gateway_id, device_id, metric, value, event_time, sequence)"
-            " VALUES ($1, $2, $3, $4, $5, $6)"
+            "INSERT INTO readings (gateway_id, device_id, metric, value, event_time, sequence,"
+            " received_at, quarantined)"
+            " VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             " ON CONFLICT ON CONSTRAINT readings_identity_key DO NOTHING RETURNING id",
             gateway_id,
             device_id,
@@ -66,6 +79,8 @@ async def apply_reading(
             value,
             event_time,
             sequence,
+            received_at,
+            quarantined,
         )
 
         if not inserted:
@@ -97,6 +112,26 @@ async def apply_reading(
             # so a delivery that stored nothing changes nothing else.
             await _touch_gateway(conn, gateway_id, event_time)
             return
+
+        if quarantined:
+            # Kept in history exactly as sent, so it can be corrected later, but
+            # never allowed to become current state.
+            await conn.execute(
+                "INSERT INTO gateway_state (gateway_id, clock_ahead, last_clock_ahead_at)"
+                " VALUES ($1, true, now())"
+                " ON CONFLICT (gateway_id) DO UPDATE SET clock_ahead = true,"
+                " last_clock_ahead_at = now()",
+                gateway_id,
+            )
+            await _touch_gateway(conn, gateway_id, received_at)
+            return
+
+        # A sane timestamp from this gateway clears its clock-ahead flag.
+        await conn.execute(
+            "UPDATE gateway_state SET clock_ahead = false"
+            " WHERE gateway_id = $1 AND clock_ahead",
+            gateway_id,
+        )
 
         prev_event_time = await conn.fetchval(
             "SELECT event_time FROM device_state WHERE device_id = $1 AND metric = $2",
