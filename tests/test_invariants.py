@@ -304,8 +304,8 @@ async def test_small_clock_drift_is_accepted(client, pg, r, clean):
 
 async def test_nan_and_infinity_rejected(client, r, clean):
     for bad in ("NaN", "Infinity", "-Infinity"):
-        body = ('{"gateway_id":"g","device_id":"d","metric":"m","value":%s,'
-                '"event_time":"2026-10-09T18:22:03Z","sequence":1}' % bad)
+        body = ('{"gateway_id":"g","device_id":"d","metric":"m","value":' + bad
+                + ',"event_time":"2026-10-09T18:22:03Z","sequence":1}')
         resp = await client.post("/ingest/readings", content=body,
                                  headers={"content-type": "application/json"})
         assert resp.status_code == 400, f"{bad} must be rejected"
