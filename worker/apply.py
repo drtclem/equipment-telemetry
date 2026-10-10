@@ -1,0 +1,135 @@
+"""Idempotent application of a reading to Postgres — the three invariants live here.
+
+Every path through this module is safe to re-run on the same input: a
+redelivered queue entry (worker crashed before acknowledging) applies as a
+no-op. Correctness comes from constraints, not from delivery semantics.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+
+import asyncpg
+
+# Invariant 2 — only a strictly newer reading (event time, with the gateway
+# sequence as tie-break) may overwrite current state. A replayed backlog
+# therefore can never clobber newer data, no matter when it arrives.
+_STATE_UPSERT = """
+INSERT INTO device_state AS ds (device_id, metric, value, event_time, sequence, gateway_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (device_id, metric) DO UPDATE
+SET value = EXCLUDED.value,
+    event_time = EXCLUDED.event_time,
+    sequence = EXCLUDED.sequence,
+    gateway_id = EXCLUDED.gateway_id,
+    updated_at = now()
+WHERE (EXCLUDED.event_time, EXCLUDED.sequence) > (ds.event_time, ds.sequence)
+"""
+
+_QUIET_PERIOD = "60 seconds"
+
+
+async def apply_reading(
+    conn: asyncpg.Connection,
+    *,
+    gateway_id: str,
+    device_id: str,
+    metric: str,
+    value: float,
+    event_time: dt.datetime,
+    sequence: int,
+) -> None:
+    """Apply one reading in a single transaction."""
+    async with conn.transaction():
+        # Invariant 3 — a device registers exactly once, even when two gateways
+        # first-report it concurrently: the primary key arbitrates.
+        await conn.execute(
+            "INSERT INTO devices (device_id, first_gateway)"
+            " VALUES ($1, $2) ON CONFLICT (device_id) DO NOTHING",
+            device_id,
+            gateway_id,
+        )
+
+        # Invariant 1 — history keeps each reading exactly once, however many
+        # times the gateway resends it: the unique constraint collapses re-sends.
+        await conn.execute(
+            "INSERT INTO readings (gateway_id, device_id, metric, value, event_time, sequence)"
+            " VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            gateway_id,
+            device_id,
+            metric,
+            value,
+            event_time,
+            sequence,
+        )
+
+        prev_event_time = await conn.fetchval(
+            "SELECT event_time FROM device_state WHERE device_id = $1 AND metric = $2",
+            device_id,
+            metric,
+        )
+
+        await conn.execute(
+            _STATE_UPSERT, device_id, metric, value, event_time, sequence, gateway_id
+        )
+
+        if prev_event_time is not None and event_time < prev_event_time:
+            # Arrival-time ledger: late data is recorded, never dropped and
+            # never allowed to regress state. Also flags the gateway as
+            # replaying so the dashboard shows a reconciliation badge.
+            await conn.execute(
+                "INSERT INTO late_readings"
+                " (device_id, metric, reading_event_time, state_event_time, gateway_id)"
+                " VALUES ($1, $2, $3, $4, $5)",
+                device_id,
+                metric,
+                event_time,
+                prev_event_time,
+                gateway_id,
+            )
+            await conn.execute(
+                "INSERT INTO gateway_state (gateway_id, max_event_time, last_seen_at,"
+                " replaying, last_late_at)"
+                " VALUES ($1, $2, now(), true, now())"
+                " ON CONFLICT (gateway_id) DO UPDATE SET replaying = true, last_late_at = now()",
+                gateway_id,
+                event_time,
+            )
+
+        # Gateway bookkeeping, and badge clearing once the replay looks drained:
+        # no new late detection for a full quiet period.
+        await conn.execute(
+            "INSERT INTO gateway_state (gateway_id, max_event_time, last_seen_at)"
+            " VALUES ($1, $2, now())"
+            " ON CONFLICT (gateway_id) DO UPDATE SET"
+            " max_event_time = GREATEST(COALESCE(gateway_state.max_event_time,"
+            " '-infinity'::timestamptz), EXCLUDED.max_event_time),"
+            " last_seen_at = now()",
+            gateway_id,
+            event_time,
+        )
+        await conn.execute(
+            "UPDATE gateway_state SET replaying = false"
+            " WHERE gateway_id = $1 AND replaying AND last_late_at IS NOT NULL"
+            f" AND last_late_at < now() - interval '{_QUIET_PERIOD}'",
+            gateway_id,
+        )
+
+
+async def apply_reading_safe(pool: asyncpg.Pool, **reading) -> None:
+    """apply_reading with a bounded retry for rare serialization conflicts.
+
+    Two workers racing on the same device can in principle deadlock or hit a
+    serialization failure; the conflict-handling invariants make any retry a
+    no-op, so retrying is always safe.
+    """
+    for attempt in range(3):
+        try:
+            async with pool.acquire() as conn:
+                await apply_reading(conn, **reading)
+            return
+        except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError):
+            if attempt == 2:
+                raise
+            await asyncio.sleep(0.05 * (attempt + 1))
