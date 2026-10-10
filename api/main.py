@@ -207,7 +207,8 @@ async def stats(request: Request):
     counts = await request.app.state.pg.fetchrow(
         "SELECT (SELECT count(*) FROM devices) AS devices,"
         " (SELECT count(*) FROM readings) AS readings,"
-        " (SELECT count(*) FROM late_readings) AS late_readings"
+        " (SELECT count(*) FROM late_readings) AS late_readings,"
+        " (SELECT count(*) FROM reading_conflicts) AS reading_conflicts"
     )
     return {
         "stream_length": stream_length,

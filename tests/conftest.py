@@ -36,7 +36,8 @@ async def r():
 async def clean(pg, r):
     """Fresh slate per test: empty tables, fresh stream + consumer group."""
     await pg.execute(
-        "TRUNCATE devices, readings, device_state, late_readings, gateway_state"
+        "TRUNCATE devices, readings, device_state, late_readings, gateway_state,"
+        " reading_conflicts"
     )
     await r.flushdb()
     await ensure_group(r)

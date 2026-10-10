@@ -202,3 +202,52 @@ async def test_resend_of_late_reading_flags_ledger_once(client, pg, r, clean):
         "SELECT value FROM device_state WHERE device_id='chiller-2' AND metric='temperature_c'"
     )
     assert state == 99.0
+
+
+# Reading identity — a gateway that reboots and restarts its sequence counter
+# must not have its new readings mistaken for resends of old ones.
+async def test_reused_sequence_with_new_time_is_a_new_reading(client, pg, r, clean):
+    now = datetime.now(UTC)
+    await post(client, reading(value=70.0, event_time=now - timedelta(minutes=5), sequence=0))
+    await post(client, reading(value=75.0, event_time=now, sequence=0))  # after reboot
+    await process_batch(pg, r, "test-worker")
+
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 2, (
+        "a reused sequence with a new timestamp is a new reading and must be kept"
+    )
+    assert await pg.fetchval(
+        "SELECT value FROM device_state WHERE device_id='chiller-2' AND metric='temperature_c'"
+    ) == 75.0
+    assert await pg.fetchval("SELECT count(*) FROM reading_conflicts") == 0
+
+
+# Safety net 1 — same identity, different value is not a resend: it is recorded
+# in the conflicts ledger, never silently dropped, and recorded once even if the
+# queue redelivers it.
+async def test_same_identity_different_value_is_recorded_not_dropped(client, pg, r, clean):
+    t = datetime.now(UTC)
+    await post(client, reading(value=70.0, event_time=t, sequence=5))
+    await post(client, reading(value=99.0, event_time=t, sequence=5))
+    await post(client, reading(value=99.0, event_time=t, sequence=5))  # redelivered
+    await process_batch(pg, r, "test-worker")
+
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 1
+    row = await pg.fetchrow("SELECT stored_value, incoming_value FROM reading_conflicts")
+    assert (row["stored_value"], row["incoming_value"]) == (70.0, 99.0)
+    assert await pg.fetchval("SELECT count(*) FROM reading_conflicts") == 1
+
+
+# Safety net 2 — current state only ever points at a reading that is in history.
+async def test_state_always_points_at_a_stored_reading(client, pg, r, clean):
+    t = datetime.now(UTC)
+    await post(client, reading(value=70.0, event_time=t, sequence=5))
+    await post(client, reading(value=99.0, event_time=t, sequence=5))  # conflicting
+    await process_batch(pg, r, "test-worker")
+
+    orphans = await pg.fetchval(
+        "SELECT count(*) FROM device_state s WHERE NOT EXISTS ("
+        " SELECT 1 FROM readings h WHERE h.device_id = s.device_id AND h.metric = s.metric"
+        " AND h.event_time = s.event_time AND h.sequence = s.sequence"
+        " AND h.gateway_id = s.gateway_id AND h.value = s.value)"
+    )
+    assert orphans == 0, "state must never show a value that history doesn't have"

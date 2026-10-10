@@ -11,7 +11,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STREAM = os.getenv("STREAM_NAME", "readings")
 GROUP = os.getenv("CONSUMER_GROUP", "ingest")
 
-SCHEMA_PATH = Path(__file__).parent / "migrations" / "001_init.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 async def connect_postgres(min_size: int = 1, max_size: int = 10) -> asyncpg.Pool:
@@ -26,7 +26,7 @@ def connect_redis() -> aioredis.Redis:
 
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
-    """Apply migrations/001_init.sql. Every statement is IF NOT EXISTS-idempotent."""
-    sql = SCHEMA_PATH.read_text()
+    """Apply migrations/*.sql in name order. Every migration is idempotent."""
     async with pool.acquire() as conn:
-        await conn.execute(sql)
+        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            await conn.execute(path.read_text())

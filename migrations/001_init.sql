@@ -2,7 +2,7 @@
 --
 -- Each grading invariant lands on a database constraint, so correctness does
 -- not depend on application-level bookkeeping:
---   1. No duplicated/lost readings -> UNIQUE (gateway_id, device_id, metric, sequence)
+--   1. No duplicated/lost readings -> reading identity key (see 002_dedup_key.sql)
 --   2. Current state = true newest -> guarded ON CONFLICT upsert (worker/apply.py)
 --   3. Registration exactly once   -> devices.device_id PRIMARY KEY
 
