@@ -175,3 +175,30 @@ async def test_malformed_reading_rejected(client, r, clean):
         },
     )
     assert resp.status_code == 400
+
+
+# A byte-identical resend of an ALREADY-LATE reading must not flag the ledger
+# twice: lateness is a property of a reading, not of a delivery. (The seeded
+# trace scenario re-sends exactly such a reading.)
+async def test_resend_of_late_reading_flags_ledger_once(client, pg, r, clean):
+    late = reading(value=11.0, event_time=NOW - timedelta(hours=1), sequence=1)
+
+    # a newer reading first, so the next one is genuinely late
+    newer = reading(value=99.0, event_time=NOW, sequence=2)
+    await post(client, newer)
+    await process_batch(pg, r, "test-worker")
+    await post(client, late)
+    await process_batch(pg, r, "test-worker")
+    assert await pg.fetchval("SELECT count(*) FROM late_readings") == 1
+
+    await post(client, late)  # the resend — byte-for-byte unchanged
+    await process_batch(pg, r, "test-worker")
+
+    assert await pg.fetchval("SELECT count(*) FROM late_readings") == 1, (
+        "a re-sent late reading must be flagged late exactly once"
+    )
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 2
+    state = await pg.fetchval(
+        "SELECT value FROM device_state WHERE device_id='chiller-2' AND metric='temperature_c'"
+    )
+    assert state == 99.0

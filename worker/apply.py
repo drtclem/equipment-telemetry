@@ -53,9 +53,11 @@ async def apply_reading(
 
         # Invariant 1 — history keeps each reading exactly once, however many
         # times the gateway resends it: the unique constraint collapses re-sends.
-        await conn.execute(
+        # RETURNING tells us whether THIS delivery actually stored a row; a
+        # re-sent or re-delivered reading is deduped to a no-op below.
+        inserted = await conn.fetch(
             "INSERT INTO readings (gateway_id, device_id, metric, value, event_time, sequence)"
-            " VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            " VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING RETURNING sequence",
             gateway_id,
             device_id,
             metric,
@@ -74,10 +76,17 @@ async def apply_reading(
             _STATE_UPSERT, device_id, metric, value, event_time, sequence, gateway_id
         )
 
-        if prev_event_time is not None and event_time < prev_event_time:
+        if (
+            inserted
+            and prev_event_time is not None
+            and event_time < prev_event_time
+        ):
             # Arrival-time ledger: late data is recorded, never dropped and
-            # never allowed to regress state. Also flags the gateway as
-            # replaying so the dashboard shows a reconciliation badge.
+            # never allowed to regress state. Gated on `inserted` so a re-sent
+            # or re-delivered reading is deduped without re-flagging lateness —
+            # lateness is a property of a reading, not of a delivery, so each
+            # distinct reading is flagged at most once. Also flags the gateway
+            # as replaying so the dashboard shows a reconciliation badge.
             await conn.execute(
                 "INSERT INTO late_readings"
                 " (device_id, metric, reading_event_time, state_event_time, gateway_id)"
