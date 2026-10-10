@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Facility Equipment — Live Telemetry</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>Facility Equipment</h1>
+  <p class="sub">Live telemetry · current state by event time</p>
+</header>
+
+<section id="stats" class="stats" aria-label="Ingestion statistics">
+  <span class="stat"><strong id="stat-readings">–</strong> readings</span>
+  <span class="stat"><strong id="stat-devices">–</strong> devices</span>
+  <span class="stat warn"><strong id="stat-late">–</strong> late arrivals</span>
+  <span class="stat"><strong id="stat-pending">–</strong> queue pending</span>
+</section>
+
+<main>
+  <section aria-labelledby="equipment-h">
+    <h2 id="equipment-h">Equipment</h2>
+    <div id="devices" class="device-grid">
+      <p class="empty">No devices yet — waiting for the first reading.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="unregistered-h">
+    <h2 id="unregistered-h">Unregistered devices</h2>
+    <p class="hint">Discovered automatically from the first reading. Claim to take ownership.</p>
+    <div id="unclaimed" class="device-grid">
+      <p class="empty">Nothing waiting.</p>
+    </div>
+  </section>
+</main>
+
+<footer><span id="last-refresh">never</span> · polls every 2 s</footer>
+<script src="/app.js"></script>
+</body>
+</html>
