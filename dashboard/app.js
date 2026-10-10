@@ -124,12 +124,29 @@ function renderOutages(outages) {
   }
 }
 
+// The dashboard runs on job-site networks too. If polling fails, the last
+// values stay on screen, so say so loudly: stale data that looks live is the
+// most expensive failure for a technician mid-test.
+let lastSuccess = null;
+
+function setConnectionLost(lost) {
+  const banner = document.getElementById("connection-lost");
+  banner.hidden = !lost;
+  if (lost) {
+    const since = lastSuccess ? lastSuccess.toLocaleTimeString() : "never";
+    banner.textContent = `Connection lost — showing data from ${since}. Retrying every 2 s.`;
+  }
+}
+
 async function refresh() {
   try {
     const [devRes, statRes, outRes] = await Promise.all([
       fetch("/devices"), fetch("/stats"), fetch("/outages?limit=10"),
     ]);
-    if (!devRes.ok || !statRes.ok || !outRes.ok) return;
+    if (!devRes.ok || !statRes.ok || !outRes.ok) {
+      setConnectionLost(true);
+      return;
+    }
     const { devices = [] } = await devRes.json();
     const stats = await statRes.json();
 
@@ -155,10 +172,12 @@ async function refresh() {
       withClaim: true,
     });
     renderOutages((await outRes.json()).outages ?? []);
+    lastSuccess = new Date();
+    setConnectionLost(false);
     document.getElementById("last-refresh").textContent =
-      `updated ${new Date().toLocaleTimeString()}`;
+      `updated ${lastSuccess.toLocaleTimeString()}`;
   } catch (err) {
-    console.error("refresh failed", err);
+    setConnectionLost(true);
   }
 }
 

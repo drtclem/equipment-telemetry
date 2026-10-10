@@ -56,3 +56,8 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 .badge.quiet { opacity: 0.85; border-style: dashed; }
 .outage-list { list-style: none; padding: 0; margin: 0; font-size: 0.9rem; }
 .outage-list li { padding: 0.35rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+
+.banner-lost {
+  margin: 0 0 1rem; padding: 0.6rem 0.9rem; border-radius: 8px;
+  background: #4a1414; border: 1px solid #e24b4a; color: #ffd9d9; font-weight: 500;
+}
