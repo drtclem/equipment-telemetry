@@ -52,3 +52,7 @@ h2 { font-size: 16px; margin: 22px 0 10px; }
 .claim-btn:hover, .claim-btn:focus-visible { border-color: var(--claimed); color: var(--claimed); outline: none; }
 .empty { color: var(--muted); font-size: 13px; }
 footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
+
+.badge.quiet { opacity: 0.85; border-style: dashed; }
+.outage-list { list-style: none; padding: 0; margin: 0; font-size: 0.9rem; }
+.outage-list li { padding: 0.35rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }

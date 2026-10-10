@@ -13,6 +13,8 @@ import os
 
 import asyncpg
 
+from db import SILENCE_THRESHOLD_SECONDS
+
 # Invariant 2 — only a strictly newer reading (event time, with the gateway
 # sequence as tie-break) may overwrite current state. A replayed backlog
 # therefore can never clobber newer data, no matter when it arrives.
@@ -29,7 +31,6 @@ WHERE (EXCLUDED.event_time, EXCLUDED.sequence) > (ds.event_time, ds.sequence)
 RETURNING 1
 """
 
-_QUIET_PERIOD = "60 seconds"
 
 # How far ahead of receive time an event_time may be before the reading is
 # quarantined. Honest clock drift is seconds to a couple of minutes; broken
@@ -111,7 +112,7 @@ async def apply_reading(
                 )
             # Current state may only ever point at a reading that is in history,
             # so a delivery that stored nothing changes nothing else.
-            await _touch_gateway(conn, gateway_id, event_time)
+            await _touch_gateway(conn, gateway_id, event_time, received_at)
             return
 
         if quarantined:
@@ -124,7 +125,7 @@ async def apply_reading(
                 " last_clock_ahead_at = now()",
                 gateway_id,
             )
-            await _touch_gateway(conn, gateway_id, received_at)
+            await _touch_gateway(conn, gateway_id, received_at, received_at)
             return
 
         # A sane timestamp from this gateway clears its clock-ahead flag.
@@ -158,8 +159,7 @@ async def apply_reading(
             # never allowed to regress state. Only reached for a newly stored
             # reading, so a re-sent or re-delivered one never re-flags lateness —
             # lateness is a property of a reading, not of a delivery, so each
-            # distinct reading is flagged at most once. Also flags the gateway
-            # as replaying so the dashboard shows a reconciliation badge.
+            # distinct reading is flagged at most once.
             await conn.execute(
                 "INSERT INTO late_readings"
                 " (device_id, metric, reading_event_time, state_event_time, gateway_id)"
@@ -170,37 +170,46 @@ async def apply_reading(
                 prev_event_time,
                 gateway_id,
             )
-            await conn.execute(
-                "INSERT INTO gateway_state (gateway_id, max_event_time, last_seen_at,"
-                " replaying, last_late_at)"
-                " VALUES ($1, $2, now(), true, now())"
-                " ON CONFLICT (gateway_id) DO UPDATE SET replaying = true, last_late_at = now()",
-                gateway_id,
-                event_time,
-            )
 
-        await _touch_gateway(conn, gateway_id, event_time)
+        await _touch_gateway(conn, gateway_id, event_time, received_at)
 
 
 async def _touch_gateway(conn: asyncpg.Connection, gateway_id: str,
-                         event_time: dt.datetime) -> None:
-    """Gateway bookkeeping, and badge clearing once the replay looks drained:
-    no new late detection for a full quiet period."""
+                         event_time: dt.datetime, received_at: dt.datetime) -> None:
+    """Gateway bookkeeping and the outage log.
+
+    If this reading was received more than SILENCE_THRESHOLD after the
+    gateway's previous one, the gap is an outage: record it. The row lock
+    (FOR UPDATE) means two workers handling the first readings after a
+    reconnect can't both see the old timestamp and log the outage twice.
+    """
+    prev_received = await conn.fetchval(
+        "SELECT last_received_at FROM gateway_state WHERE gateway_id = $1 FOR UPDATE",
+        gateway_id,
+    )
+    if (
+        prev_received is not None
+        and received_at - prev_received > dt.timedelta(seconds=SILENCE_THRESHOLD_SECONDS)
+    ):
+        await conn.execute(
+            "INSERT INTO gateway_outages (gateway_id, silent_since, resumed_at)"
+            " VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            gateway_id,
+            prev_received,
+            received_at,
+        )
     await conn.execute(
-        "INSERT INTO gateway_state (gateway_id, max_event_time, last_seen_at)"
-        " VALUES ($1, $2, now())"
+        "INSERT INTO gateway_state (gateway_id, max_event_time, last_seen_at, last_received_at)"
+        " VALUES ($1, $2, now(), $3)"
         " ON CONFLICT (gateway_id) DO UPDATE SET"
         " max_event_time = GREATEST(COALESCE(gateway_state.max_event_time,"
         " '-infinity'::timestamptz), EXCLUDED.max_event_time),"
-        " last_seen_at = now()",
+        " last_seen_at = now(),"
+        " last_received_at = GREATEST(COALESCE(gateway_state.last_received_at,"
+        " '-infinity'::timestamptz), EXCLUDED.last_received_at)",
         gateway_id,
         event_time,
-    )
-    await conn.execute(
-        "UPDATE gateway_state SET replaying = false"
-        " WHERE gateway_id = $1 AND replaying AND last_late_at IS NOT NULL"
-        f" AND last_late_at < now() - interval '{_QUIET_PERIOD}'",
-        gateway_id,
+        received_at,
     )
 
 

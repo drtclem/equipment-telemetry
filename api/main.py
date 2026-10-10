@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from db import GROUP, STREAM, connect_postgres, connect_redis
+from db import GROUP, SILENCE_THRESHOLD_SECONDS, STREAM, connect_postgres, connect_redis
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 
@@ -82,6 +82,26 @@ async def healthz(request: Request):
     return {"status": "ok"}
 
 
+def _freshness(now: datetime, gateway_last_received: datetime | None,
+               state_updated_at: datetime) -> dict:
+    """Is this value live, and if not, why not?
+
+    gateway_silent: the gateway that produced it hasn't been heard from for
+      SILENCE_THRESHOLD; newer data may be in flight (network problem).
+    device_quiet: the gateway is reporting, but this metric hasn't advanced
+      (an equipment/sensor problem, itself a commissioning finding).
+    """
+    if gateway_last_received is None:
+        return {"freshness": "gateway_silent", "silent_seconds": None}
+    gateway_gap = (now - gateway_last_received).total_seconds()
+    if gateway_gap > SILENCE_THRESHOLD_SECONDS:
+        return {"freshness": "gateway_silent", "silent_seconds": round(gateway_gap)}
+    metric_gap = (now - state_updated_at).total_seconds()
+    if metric_gap > SILENCE_THRESHOLD_SECONDS:
+        return {"freshness": "device_quiet", "silent_seconds": round(metric_gap)}
+    return {"freshness": "live", "silent_seconds": None}
+
+
 @app.get("/devices")
 async def list_devices(request: Request):
     pg = request.app.state.pg
@@ -91,11 +111,12 @@ async def list_devices(request: Request):
         " FROM devices ORDER BY device_id"
     )
     state = await pg.fetch(
-        "SELECT device_id, metric, value, event_time, sequence, gateway_id FROM device_state"
+        "SELECT device_id, metric, value, event_time, sequence, gateway_id, updated_at"
+        " FROM device_state"
     )
-    replaying = {
-        row["gateway_id"]
-        for row in await pg.fetch("SELECT gateway_id FROM gateway_state WHERE replaying")
+    last_received = {
+        row["gateway_id"]: row["last_received_at"]
+        for row in await pg.fetch("SELECT gateway_id, last_received_at FROM gateway_state")
     }
     by_device: dict[str, dict] = {}
     for row in state:
@@ -104,7 +125,7 @@ async def list_devices(request: Request):
             "event_time": row["event_time"].isoformat(),
             "age_seconds": round((now - row["event_time"]).total_seconds(), 3),
             "gateway_id": row["gateway_id"],
-            "reconciling": row["gateway_id"] in replaying,
+            **_freshness(now, last_received.get(row["gateway_id"]), row["updated_at"]),
         }
     return {
         "devices": [
@@ -170,6 +191,28 @@ async def device_detail(device_id: str, request: Request):
                 "quarantined": h["quarantined"],
             }
             for h in history
+        ],
+    }
+
+
+@app.get("/outages")
+async def outages(request: Request, limit: int = 20):
+    """Most recent gateway outages: when each went silent, when it resumed."""
+    rows = await request.app.state.pg.fetch(
+        "SELECT gateway_id, silent_since, resumed_at FROM gateway_outages"
+        " ORDER BY resumed_at DESC LIMIT $1",
+        min(max(limit, 1), 200),
+    )
+    return {
+        "silence_threshold_seconds": SILENCE_THRESHOLD_SECONDS,
+        "outages": [
+            {
+                "gateway_id": r["gateway_id"],
+                "silent_since": r["silent_since"].isoformat(),
+                "resumed_at": r["resumed_at"].isoformat(),
+                "duration_seconds": round((r["resumed_at"] - r["silent_since"]).total_seconds()),
+            }
+            for r in rows
         ],
     }
 

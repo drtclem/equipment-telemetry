@@ -136,7 +136,7 @@ async def test_t5_boot_and_surfaces(client, pg, r, clean):
     assert devs[0]["device_id"] == "ahu-1"
     assert devs[0]["status"] == "unclaimed"
     assert devs[0]["metrics"]["supply_air_temp"]["value"] == 55.0
-    assert devs[0]["metrics"]["supply_air_temp"]["reconciling"] is False
+    assert devs[0]["metrics"]["supply_air_temp"]["freshness"] == "live"
 
     st = (await client.get("/stats")).json()
     assert st["readings"] == 1
@@ -399,3 +399,79 @@ async def test_late_flag_survives_worker_interleaving(pg, clean):
     assert await pg.fetchval(
         "SELECT count(*) FROM late_readings WHERE gateway_id='gw-a'"
     ) == 1, "A lost to a reading committed before it: it must be flagged late"
+
+
+# Outage log — a gateway that goes silent past the threshold and then speaks
+# again leaves exactly one outage row, measured on the API's receive clock.
+async def test_outage_logged_when_gateway_returns(pg, clean):
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    async with pg.acquire() as conn:
+        await apply_reading(conn, **reading(sequence=1, event_time=t0), received_at=t0)
+        # normal cadence: no outage
+        await apply_reading(conn, **reading(sequence=2, event_time=t0 + timedelta(seconds=5)),
+                            received_at=t0 + timedelta(seconds=5))
+        # 5 minutes of silence, then the gateway speaks (backlog + live)
+        back = t0 + timedelta(minutes=5, seconds=5)
+        await apply_reading(conn, **reading(sequence=3, event_time=t0 + timedelta(seconds=30)),
+                            received_at=back)
+        await apply_reading(conn, **reading(sequence=4, event_time=back), received_at=back)
+
+    rows = await pg.fetch("SELECT silent_since, resumed_at FROM gateway_outages")
+    assert len(rows) == 1
+    assert rows[0]["silent_since"] == t0 + timedelta(seconds=5)
+    assert rows[0]["resumed_at"] == back
+
+
+# A backed-up queue or a stopped worker must not look like a gateway outage:
+# readings received seconds apart are processed minutes apart here.
+async def test_worker_lag_is_not_an_outage(pg, clean):
+    received = datetime.now(UTC) - timedelta(minutes=10)
+    async with pg.acquire() as conn:
+        for i in range(3):
+            await apply_reading(conn, **reading(sequence=i, event_time=received),
+                                received_at=received + timedelta(seconds=i))
+    assert await pg.fetchval("SELECT count(*) FROM gateway_outages") == 0
+
+
+# Two workers applying the first readings after a reconnect at the same moment
+# must log the outage once, not twice.
+async def test_outage_logged_once_under_concurrency(pg, clean):
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    async with pg.acquire() as conn:
+        await apply_reading(conn, **reading(sequence=0, event_time=t0), received_at=t0)
+    back = t0 + timedelta(minutes=5)
+
+    async def one(i):
+        async with pg.acquire() as conn:
+            await apply_reading(conn, **reading(device_id=f"dev-{i}", sequence=i,
+                                                event_time=back), received_at=back)
+
+    await asyncio.gather(*(one(i) for i in range(1, 9)))
+    assert await pg.fetchval("SELECT count(*) FROM gateway_outages") == 1
+
+
+# Freshness says WHY a value may be stale: gateway silent (network) versus
+# device quiet while its gateway keeps reporting (equipment/sensor).
+async def test_freshness_distinguishes_gateway_silent_from_device_quiet(client, pg, r, clean):
+    now = datetime.now(UTC)
+    await post(client, reading(gateway_id="gw-net", device_id="ahu-1", sequence=1, event_time=now))
+    await post(client, reading(gateway_id="gw-ok", device_id="pump-1", sequence=1, event_time=now))
+    await post(client, reading(gateway_id="gw-ok", device_id="pump-2", sequence=1, event_time=now))
+    await process_batch(pg, r, "test-worker")
+
+    # gw-net went silent 3 min ago; pump-1 stopped advancing 3 min ago while
+    # gw-ok kept reporting (pump-2 is still live)
+    await pg.execute("UPDATE gateway_state SET last_received_at = now() - interval '3 minutes'"
+                     " WHERE gateway_id = 'gw-net'")
+    await pg.execute("UPDATE device_state SET updated_at = now() - interval '3 minutes'"
+                     " WHERE device_id = 'pump-1'")
+
+    devs = {d["device_id"]: d for d in (await client.get("/devices")).json()["devices"]}
+    m = lambda d: devs[d]["metrics"]["temperature_c"]  # noqa: E731
+    assert m("ahu-1")["freshness"] == "gateway_silent"
+    assert 170 <= m("ahu-1")["silent_seconds"] <= 190
+    assert m("pump-1")["freshness"] == "device_quiet"
+    assert m("pump-2")["freshness"] == "live"
+
+    out = (await client.get("/outages")).json()
+    assert out["silence_threshold_seconds"] == 60 and out["outages"] == []

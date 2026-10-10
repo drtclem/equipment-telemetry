@@ -11,6 +11,12 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STREAM = os.getenv("STREAM_NAME", "readings")
 GROUP = os.getenv("CONSUMER_GROUP", "ingest")
 
+# How long a gateway may go without a reading before the system stops assuming
+# its data is merely in flight and says so: its devices are flagged "may be
+# behind" and, when it speaks again, the gap is written to the outage log.
+# Should be ~3x a site's normal reporting interval; 60 s is a default.
+SILENCE_THRESHOLD_SECONDS = int(os.getenv("SILENCE_THRESHOLD_SECONDS", "60"))
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 

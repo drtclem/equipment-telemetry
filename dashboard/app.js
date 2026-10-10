@@ -50,10 +50,16 @@ function deviceCard(device, { withClaim = false } = {}) {
     row.append(name, value, when);
     card.append(row);
 
-    if (m.reconciling) {
+    if (m.freshness === "gateway_silent") {
       const badge = document.createElement("span");
       badge.className = "badge";
-      badge.textContent = "reconciling — backlog may be in flight";
+      const silent = m.silent_seconds == null ? "" : ` ${age(m.silent_seconds).replace(" ago", "")}`;
+      badge.textContent = `gateway ${m.gateway_id} silent${silent} — value may be behind`;
+      card.append(badge);
+    } else if (m.freshness === "device_quiet") {
+      const badge = document.createElement("span");
+      badge.className = "badge quiet";
+      badge.textContent = `no new ${metric} for ${age(m.silent_seconds).replace(" ago", "")} — gateway is reporting`;
       card.append(badge);
     }
   }
@@ -99,10 +105,31 @@ function renderDevices(target, devices, options) {
   for (const device of devices) target.append(deviceCard(device, options));
 }
 
+function renderOutages(outages) {
+  const list = document.getElementById("outages");
+  list.replaceChildren();
+  if (outages.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No gateway outages recorded.";
+    list.append(li);
+    return;
+  }
+  for (const o of outages) {
+    const li = document.createElement("li");
+    const from = new Date(o.silent_since).toLocaleTimeString();
+    const to = new Date(o.resumed_at).toLocaleTimeString();
+    li.textContent = `${o.gateway_id} — silent ${from} → ${to} (${age(o.duration_seconds).replace(" ago", "")}); readings from this window may have arrived late`;
+    list.append(li);
+  }
+}
+
 async function refresh() {
   try {
-    const [devRes, statRes] = await Promise.all([fetch("/devices"), fetch("/stats")]);
-    if (!devRes.ok || !statRes.ok) return;
+    const [devRes, statRes, outRes] = await Promise.all([
+      fetch("/devices"), fetch("/stats"), fetch("/outages?limit=10"),
+    ]);
+    if (!devRes.ok || !statRes.ok || !outRes.ok) return;
     const { devices = [] } = await devRes.json();
     const stats = await statRes.json();
 
@@ -127,6 +154,7 @@ async function refresh() {
       emptyText: "Nothing waiting.",
       withClaim: true,
     });
+    renderOutages((await outRes.json()).outages ?? []);
     document.getElementById("last-refresh").textContent =
       `updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
