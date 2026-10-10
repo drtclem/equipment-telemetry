@@ -475,3 +475,67 @@ async def test_freshness_distinguishes_gateway_silent_from_device_quiet(client, 
 
     out = (await client.get("/outages")).json()
     assert out["silence_threshold_seconds"] == 60 and out["outages"] == []
+
+
+async def test_oversized_sequence_rejected(client, r, clean):
+    body = dict(reading())
+    body["event_time"] = body["event_time"].isoformat()
+    body["sequence"] = 2**63  # one past Postgres BIGINT
+    assert (await client.post("/ingest/readings", json=body)).status_code == 400
+    body["sequence"] = 2**63 - 1
+    assert (await client.post("/ingest/readings", json=body)).status_code == 202
+
+
+def _raw_fields(**overrides):
+    f = {"gateway_id": "gw-04", "device_id": "chiller-2", "metric": "temperature_c",
+         "value": "71.4", "event_time": datetime.now(UTC).isoformat(), "sequence": "1",
+         "received_at": datetime.now(UTC).isoformat()}
+    f.update(overrides)
+    return f
+
+
+# Dead letters — an entry that can never be applied (here: one that slipped
+# past validation straight onto the queue) is parked after MAX_ATTEMPTS, the
+# worker never crashes, and good traffic behind it keeps flowing.
+async def test_poison_entry_is_dead_lettered_not_crash_looped(pg, r, clean):
+    from worker.main import MAX_ATTEMPTS
+    poison_id = await r.xadd("readings", _raw_fields(sequence=str(10**20)))
+    await process_batch(pg, r, "w")  # delivery 1: fails, stays pending
+    good = _raw_fields(sequence="2", value="56.0")
+    await r.xadd("readings", good)
+    await process_batch(pg, r, "w")  # good traffic is not blocked
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 1
+
+    for _ in range(MAX_ATTEMPTS + 2):  # recovery must never raise
+        await recover_pending(pg, r, "w", min_idle_ms=0)
+
+    row = await pg.fetchrow("SELECT stream_entry_id, fields, error, attempts FROM dead_letters")
+    assert row["stream_entry_id"] == poison_id
+    assert '"100000000000000000000"' in row["fields"], "raw payload kept exactly as queued"
+    assert row["attempts"] == MAX_ATTEMPTS
+    assert (await r.xpending("readings", "ingest"))["pending"] == 0, "acknowledged once parked"
+    assert await pg.fetchval("SELECT count(*) FROM dead_letters") == 1
+
+
+# A database outage fails every entry for a while. That must not dead-letter
+# good readings: when Postgres is back, the retry succeeds, even if the entry
+# has been delivered more than MAX_ATTEMPTS times by then.
+async def test_database_outage_does_not_dead_letter_good_readings(pg, r, clean, monkeypatch):
+    import worker.main as wm
+
+    async def db_down(*args, **kwargs):
+        raise ConnectionRefusedError("postgres is down")
+
+    await r.xadd("readings", _raw_fields(sequence="7"))
+    monkeypatch.setattr(wm, "apply_reading_safe", db_down)
+    monkeypatch.setattr(wm, "dead_letter", db_down)  # can't write dead letters either
+    await process_batch(pg, r, "w")
+    for _ in range(wm.MAX_ATTEMPTS + 3):
+        await recover_pending(pg, r, "w", min_idle_ms=0)
+    assert (await r.xpending("readings", "ingest"))["pending"] == 1, "waits in the queue"
+
+    monkeypatch.undo()  # database is back
+    await recover_pending(pg, r, "w", min_idle_ms=0)
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 1
+    assert await pg.fetchval("SELECT count(*) FROM dead_letters") == 0
+    assert (await r.xpending("readings", "ingest"))["pending"] == 0

@@ -7,6 +7,7 @@ the Postgres constraints make the effect exactly-once.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -26,6 +27,7 @@ RECOVERY_MIN_IDLE_MS = int(os.getenv("WORKER_RECOVERY_MIN_IDLE_MS", "30000"))
 # Unique per worker: in a container the worker is always PID 1, so the PID
 # alone would make every container the same Redis consumer. The hostname
 # (container ID) tells them apart; the PID separates processes on one host.
+MAX_ATTEMPTS = int(os.getenv("WORKER_MAX_ATTEMPTS", "5"))
 CONSUMER = os.getenv("WORKER_CONSUMER", f"worker-{socket.gethostname()}-{os.getpid()}")
 
 
@@ -78,11 +80,40 @@ async def process_batch(pg_pool, redis: aioredis.Redis, consumer: str) -> int:
     return processed
 
 
-async def recover_pending(pg_pool, redis: aioredis.Redis, consumer: str,
-                          min_idle_ms: int = RECOVERY_MIN_IDLE_MS) -> int:
-    """Claim entries left pending by a crashed worker and re-apply them.
+async def _times_delivered(redis: aioredis.Redis, entry_id) -> int:
+    info = await redis.xpending_range(STREAM, GROUP, min=entry_id, max=entry_id, count=1)
+    return int(info[0]["times_delivered"]) if info else 0
 
-    The idempotent apply + XACK turns redelivery into exactly-once effect.
+
+async def dead_letter(pg_pool, redis: aioredis.Redis, entry_id, fields: dict,
+                      error: BaseException, attempts: int) -> None:
+    """Park an entry that can never be applied, then acknowledge it.
+
+    Written to Postgres BEFORE the ack: if Postgres is down this raises, the
+    entry stays pending in the durable queue, and nothing is lost.
+    """
+    async with pg_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO dead_letters (stream_entry_id, fields, error, attempts)"
+            " VALUES ($1, $2::jsonb, $3, $4) ON CONFLICT (stream_entry_id) DO NOTHING",
+            str(entry_id),
+            json.dumps(fields),
+            f"{type(error).__name__}: {error}"[:2000],
+            attempts,
+        )
+    await redis.xack(STREAM, GROUP, entry_id)
+
+
+async def recover_pending(pg_pool, redis: aioredis.Redis, consumer: str,
+                          min_idle_ms: int = RECOVERY_MIN_IDLE_MS,
+                          max_attempts: int = MAX_ATTEMPTS) -> int:
+    """Claim entries left pending (crashed worker, or a failed apply) and retry.
+
+    Always try to apply first. Only if that fails AND the entry has already
+    been delivered max_attempts times is it dead-lettered, so a Postgres
+    outage that fails everything for a few minutes dead-letters nothing: once
+    the database is back, the retry simply succeeds. A failure here is logged,
+    never raised, so one bad entry can't crash the worker.
     """
     result = await redis.xautoclaim(
         STREAM, GROUP, consumer, min_idle_time=min_idle_ms, count=BATCH
@@ -92,8 +123,20 @@ async def recover_pending(pg_pool, redis: aioredis.Redis, consumer: str,
     for entry_id, fields in entries or []:
         if not fields:  # entry was deleted while pending
             continue
-        await process_entry(pg_pool, redis, entry_id, fields)
-        recovered += 1
+        try:
+            await process_entry(pg_pool, redis, entry_id, fields)
+            recovered += 1
+        except Exception as exc:  # noqa: BLE001 - any failure is handled the same way
+            try:
+                attempts = await _times_delivered(redis, entry_id)
+                if attempts >= max_attempts:
+                    await dead_letter(pg_pool, redis, entry_id, fields, exc, attempts)
+                    log.error("dead-lettered %s after %d attempts: %s", entry_id, attempts, exc)
+                else:
+                    log.warning("retry %d/%d failed for %s: %s",
+                                attempts, max_attempts, entry_id, exc)
+            except Exception:  # noqa: BLE001 - e.g. Postgres down: stays pending
+                log.exception("could not dead-letter %s; leaving pending", entry_id)
     return recovered
 
 
@@ -120,9 +163,13 @@ async def main() -> None:
                     raise
             iterations += 1
             if iterations % 10 == 0:
-                recovered = await recover_pending(pg_pool, redis, CONSUMER)
-                if recovered:
-                    log.info("recovered %d pending entries", recovered)
+                try:
+                    recovered = await recover_pending(pg_pool, redis, CONSUMER)
+                except Exception:  # noqa: BLE001 - keep consuming; retry next round
+                    log.exception("recovery round failed")
+                else:
+                    if recovered:
+                        log.info("recovered %d pending entries", recovered)
     finally:
         await pg_pool.close()
         await redis.aclose()

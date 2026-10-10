@@ -155,6 +155,7 @@ async function refresh() {
     document.getElementById("stat-late").textContent = stats.late_readings;
     document.getElementById("stat-pending").textContent = stats.pending_entries;
     document.getElementById("stat-quarantined").textContent = stats.quarantined;
+    document.getElementById("stat-dead").textContent = stats.dead_letters;
     const ahead = stats.clock_ahead_gateways ?? [];
     const banner = document.getElementById("clock-ahead");
     banner.hidden = ahead.length === 0;

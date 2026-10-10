@@ -24,7 +24,7 @@ class ReadingIn(BaseModel):
     metric: str = Field(min_length=1, max_length=200)
     value: float = Field(allow_inf_nan=False)  # NaN/inf is never real data
     event_time: datetime
-    sequence: int = Field(ge=0)
+    sequence: int = Field(ge=0, le=2**63 - 1)  # must fit Postgres BIGINT
 
 
 class ClaimBody(BaseModel):
@@ -257,7 +257,8 @@ async def stats(request: Request):
         " (SELECT count(*) FROM readings) AS readings,"
         " (SELECT count(*) FROM late_readings) AS late_readings,"
         " (SELECT count(*) FROM reading_conflicts) AS reading_conflicts,"
-        " (SELECT count(*) FROM readings WHERE quarantined) AS quarantined"
+        " (SELECT count(*) FROM readings WHERE quarantined) AS quarantined,"
+        " (SELECT count(*) FROM dead_letters) AS dead_letters"
     )
     clock_ahead = [
         row["gateway_id"]
