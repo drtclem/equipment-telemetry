@@ -309,3 +309,93 @@ async def test_nan_and_infinity_rejected(client, r, clean):
         resp = await client.post("/ingest/readings", content=body,
                                  headers={"content-type": "application/json"})
         assert resp.status_code == 400, f"{bad} must be rejected"
+
+
+# Concurrency — with several workers, readings for the same device and metric
+# can be applied at the same moment. State must still end on the newest
+# reading, history must hold every reading once, and the late ledger must never
+# flag the reading that won (it was never beaten).
+async def test_concurrent_workers_same_metric(pg, clean):
+    import random as _random
+    base = datetime.now(UTC)
+    readings = [reading(gateway_id=f"gw-{i % 3}", value=float(i),
+                        event_time=base - timedelta(seconds=i), sequence=i)
+                for i in range(40)]
+    _random.shuffle(readings)
+
+    async def apply_one(rd):
+        async with pg.acquire() as conn:
+            await apply_reading(conn, **rd)
+
+    await asyncio.gather(*(apply_one(rd) for rd in readings))
+
+    assert await pg.fetchval("SELECT count(*) FROM readings") == 40
+    state = await pg.fetchrow("SELECT value, event_time FROM device_state")
+    assert state["value"] == 0.0 and state["event_time"] == base, "newest reading wins"
+    assert await pg.fetchval(
+        "SELECT count(*) FROM late_readings WHERE reading_event_time = $1", base
+    ) == 0, "the newest reading can never be late"
+    assert await pg.fetchval(
+        "SELECT count(*) FROM late_readings WHERE reading_event_time >= state_event_time"
+    ) == 0, "every late flag points at a strictly newer reading that beat it"
+
+
+class _PauseBeforeStateWrite:
+    """Connection wrapper that holds a transaction just before it writes
+    device_state, until `gate` is released. Lets a test force the exact
+    interleaving where another worker commits in between."""
+
+    def __init__(self, conn, gate):
+        self._conn, self._gate = conn, gate
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    async def _maybe_pause(self, query):
+        if "INSERT INTO device_state" in query:
+            await self._gate.wait()
+
+    async def execute(self, query, *args):
+        await self._maybe_pause(query)
+        return await self._conn.execute(query, *args)
+
+    async def fetchval(self, query, *args):
+        await self._maybe_pause(query)
+        return await self._conn.fetchval(query, *args)
+
+    async def fetch(self, query, *args):
+        await self._maybe_pause(query)
+        return await self._conn.fetch(query, *args)
+
+
+# Forced interleaving: worker A (older reading) is paused right before it
+# writes state; worker B (newer reading) commits in that gap. A arrived after B
+# was already current, so A must be flagged late. Judging lateness from a read
+# taken BEFORE the write would see "no state yet" and miss the flag.
+async def test_late_flag_survives_worker_interleaving(pg, clean):
+    t = datetime.now(UTC)
+    async with pg.acquire() as conn:  # pre-register so the two don't contend on it
+        await apply_reading(conn, **reading(metric="other", sequence=99))
+
+    gate = asyncio.Event()
+    older = reading(gateway_id="gw-a", value=1.0, event_time=t - timedelta(minutes=1), sequence=1)
+    newer = reading(gateway_id="gw-b", value=2.0, event_time=t, sequence=2)
+
+    async def worker_a():
+        async with pg.acquire() as conn:
+            await apply_reading(_PauseBeforeStateWrite(conn, gate), **older)
+
+    async def worker_b():
+        await asyncio.sleep(0.2)  # let A reach its pause point
+        async with pg.acquire() as conn:
+            await apply_reading(conn, **newer)
+        gate.set()
+
+    await asyncio.wait_for(asyncio.gather(worker_a(), worker_b()), timeout=10)
+
+    assert await pg.fetchval(
+        "SELECT value FROM device_state WHERE metric='temperature_c'"
+    ) == 2.0
+    assert await pg.fetchval(
+        "SELECT count(*) FROM late_readings WHERE gateway_id='gw-a'"
+    ) == 1, "A lost to a reading committed before it: it must be flagged late"

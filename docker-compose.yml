@@ -41,7 +41,10 @@ services:
       redis:
         condition: service_healthy
 
-  worker:
+  # Two workers in one consumer group: each entry goes to exactly one of them,
+  # and either can recover the other's unacknowledged entries. Makes the
+  # registration race genuinely concurrent and demonstrates horizontal scaling.
+  worker: &worker
     build: .
     command: python -m worker.main
     restart: unless-stopped
@@ -53,6 +56,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  worker-2: *worker
 
 volumes:
   pgdata:

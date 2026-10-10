@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import signal
+import socket
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
@@ -22,7 +23,10 @@ log = logging.getLogger("worker")
 BATCH = int(os.getenv("WORKER_BATCH", "100"))
 BLOCK_MS = int(os.getenv("WORKER_BLOCK_MS", "1000"))
 RECOVERY_MIN_IDLE_MS = int(os.getenv("WORKER_RECOVERY_MIN_IDLE_MS", "30000"))
-CONSUMER = os.getenv("WORKER_CONSUMER", f"worker-{os.getpid()}")
+# Unique per worker: in a container the worker is always PID 1, so the PID
+# alone would make every container the same Redis consumer. The hostname
+# (container ID) tells them apart; the PID separates processes on one host.
+CONSUMER = os.getenv("WORKER_CONSUMER", f"worker-{socket.gethostname()}-{os.getpid()}")
 
 
 def parse_fields(fields: dict) -> dict:

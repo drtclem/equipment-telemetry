@@ -26,6 +26,7 @@ SET value = EXCLUDED.value,
     gateway_id = EXCLUDED.gateway_id,
     updated_at = now()
 WHERE (EXCLUDED.event_time, EXCLUDED.sequence) > (ds.event_time, ds.sequence)
+RETURNING 1
 """
 
 _QUIET_PERIOD = "60 seconds"
@@ -133,15 +134,21 @@ async def apply_reading(
             gateway_id,
         )
 
-        prev_event_time = await conn.fetchval(
-            "SELECT event_time FROM device_state WHERE device_id = $1 AND metric = $2",
-            device_id,
-            metric,
-        )
-
-        await conn.execute(
+        # Update first, judge lateness second. If the guarded upsert did not
+        # apply, ON CONFLICT DO UPDATE has still locked the state row, so the
+        # value we read next is the one that beat us and cannot change under
+        # us. (Reading state BEFORE the upsert would let two workers
+        # interleave and misjudge lateness.)
+        applied = await conn.fetchval(
             _STATE_UPSERT, device_id, metric, value, event_time, sequence, gateway_id
         )
+        prev_event_time = None
+        if applied is None:
+            prev_event_time = await conn.fetchval(
+                "SELECT event_time FROM device_state WHERE device_id = $1 AND metric = $2",
+                device_id,
+                metric,
+            )
 
         if (
             prev_event_time is not None
