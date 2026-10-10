@@ -15,6 +15,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Durability: the API answers 202 only after XADD, so an accepted reading
+    # must survive a Redis crash. AOF with fsync on every write closes that gap.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -24,6 +29,7 @@ services:
   api:
     build: .
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://telemetry:telemetry@postgres:5432/telemetry
       REDIS_URL: redis://redis:6379/0
@@ -38,6 +44,7 @@ services:
   worker:
     build: .
     command: python -m worker.main
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://telemetry:telemetry@postgres:5432/telemetry
       REDIS_URL: redis://redis:6379/0
@@ -49,3 +56,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
