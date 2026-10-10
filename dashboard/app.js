@@ -23,7 +23,10 @@ function deviceCard(device, { withClaim = false } = {}) {
 
   const gw = document.createElement("div");
   gw.className = "gateway";
-  gw.textContent = `gateway: ${device.first_gateway ?? "—"}`;
+  const firstSeen = (Date.now() - Date.parse(device.first_seen_at)) / 1000;
+  gw.textContent = withClaim
+    ? `first seen ${age(firstSeen)} via ${device.first_gateway ?? "—"}`
+    : `gateway: ${device.first_gateway ?? "—"}`;
 
   card.append(head, gw);
 
@@ -163,7 +166,10 @@ async function refresh() {
       ? `Clock ahead — readings quarantined from: ${ahead.join(", ")}`
       : "";
 
-    const unclaimed = devices.filter((d) => d.status === "unclaimed");
+    // newest first, so a device that just started reporting appears at the top
+    const unclaimed = devices
+      .filter((d) => d.status === "unclaimed")
+      .sort((a, b) => b.first_seen_at.localeCompare(a.first_seen_at));
     const claimed = devices.filter((d) => d.status === "claimed");
     renderDevices(document.getElementById("devices"), claimed, {
       emptyText: "No claimed devices yet.",
