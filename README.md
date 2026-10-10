@@ -30,14 +30,18 @@ Feed a reading:
 ## Generator scenarios (provided script)
 
     docker compose up -d postgres redis api worker
-    python -m pip install requests
-    python telemetry_generator.py --scenario clean
-    python telemetry_generator.py --scenario backlog
-    python telemetry_generator.py --scenario race
-    python telemetry_generator.py --scenario trace --seed drtclem
+    python -m pip install requests   # only if requests is not already present
+    python telemetry_generator.py --target http://localhost:8000 --scenario clean
+    python telemetry_generator.py --target http://localhost:8000 --scenario replay
+    python telemetry_generator.py --target http://localhost:8000 --scenario race
+    python telemetry_generator.py --target http://localhost:8000 --scenario trace --seed drtclem
+    #   ^ prints the personalized sequence first (traced in DESIGN.md);
+    #     press enter (or add --yes) to send it
 
-(Scenario names and flags follow the provided generator script; see
-DESIGN.md "Seeded trace" for what each demonstrates.)
+`replay` is the one to watch for correctness: one gateway replays a 20-reading
+backlog with byte-identical resends while another streams live data. After it,
+the device's history has every reading exactly once and its current state is
+not stuck on stale data.
 
 ## Tests
 

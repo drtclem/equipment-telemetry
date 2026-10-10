@@ -93,13 +93,49 @@ plus a bounded stream (`XTRIM MAXLEN`) and Postgres table partitioning by
 `event_time` are the first three moves. None of them change the invariants;
 they're all below the constraint layer.
 
-## Seeded trace
+## Seeded trace (`--scenario trace --seed drtclem`)
 
-The generator's trace scenario (run with `--seed drtclem` once the provided
-script is available — the build environment cannot reach the private
-reference) replays a randomized-yet-deterministic session of re-sends,
-backlog floods, and a registration race. The dashboard during that run:
-late-arrival counter climbing while a "reconciling — backlog may be in
-flight" badge shows on the affected device, state values never regressing,
-and the session ends with the same device count the scenario began with.
-This section is filled from the actual run in the demo video.
+The generator prints this sequence for our seed — device `trace-device-6462`,
+gateways `gw-a-drtclem` / `gw-b-drtclem`, all event times relative to a base
+moment T. Arrival order is the row order; the last line is a byte-identical
+resend of event #2:
+
+| #  | gateway      | metric      | value | event time |
+|----|--------------|-------------|-------|------------|
+| 0  | gw-a-drtclem | vibration   | 91.38 | T + 5s     |
+| 1  | gw-a-drtclem | temperature | 98.03 | T + 2s     |
+| 2  | gw-b-drtclem | temperature | 43.27 | T + 1s     |
+| 3  | gw-b-drtclem | vibration   | 77.4  | T + 4s     |
+| 4  | gw-a-drtclem | status      | 11.98 | T + 0s     |
+| 5  | gw-a-drtclem | vibration   | 89.76 | T + 3s     |
+| 2′ | gw-b-drtclem | temperature | 43.27 | T + 1s     |
+
+Tracing each arrival through the worker (store → guard state → late check):
+
+- **#0** — first report: device registers (first gateway `gw-a-drtclem`),
+  history row stored, `vibration = 91.38 @ T+5`. No prior state → not late.
+- **#1** — new metric: history stored, `temperature = 98.03 @ T+2`. Not late.
+- **#2** — new history row; `temperature` state is at T+2 and T+1 < T+2 →
+  **late**. Ledger row: reading 43.27 @ T+1, current state 98.03 @ T+2,
+  gateway `gw-b-drtclem` flagged reconciling. Guard rejects: `(T+1, 2) >
+  (T+2, 1)` is false → state stays **98.03**.
+- **#3** — new row; `vibration` is at T+5 and T+4 < T+5 → **late** (ledger
+  row 2, `gw-b-drtclem`). State stays **91.38**.
+- **#4** — new metric: `status = 11.98 @ T+0`. Not late.
+- **#5** — new row; T+3 < T+5 → **late** (ledger row 3, `gw-a-drtclem` now
+  also reconciling). State stays **91.38**.
+- **#2′** — byte-identical resend: the unique constraint dedupes history, and
+  the late check is gated on the insert actually storing a row, so this is a
+  **pure no-op** — no duplicate history row, no second late flag.
+
+**Predicted end state:** 6 history rows from 7 deliveries; current state
+`vibration 91.38 @ T+5` · `temperature 98.03 @ T+2` · `status 11.98 @ T+0`
+(the event-time maximum of each metric, i.e. the first arrivals win here);
+late ledger 3 rows (#2, #3, #5); both gateways reconciling, badges clearing
+60 s after their last late detection.
+
+**Verification (actual run):** 6 history rows · late ledger 3 · device
+`trace-device-6462` registered once, first gateway `gw-a-drtclem` · state
+vibration 91.38, temperature 98.03, status 11.98 · reconciling badges shown
+for both gateways — matches the trace on every point.
+
