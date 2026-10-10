@@ -69,7 +69,9 @@ filter. A reading that arrives after a newer one was stored still goes into
 history (nothing is dropped), into a `late_readings` ledger with the state
 time it lost to, and flags its gateway as "reconciling" so the dashboard shows
 a badge instead of silently pretending the world is monotonic. The badge
-clears after a quiet period with no new late arrivals. The brief's late
+clears when the flagged gateway's next reading arrives after a full quiet
+period with no new late detection — a gateway that has gone silent may still
+have backlog in flight, so its badge waits for it to speak again. The brief's late
 requirement is about *delivered* readings — holding them back to filter
 lateness is a design choice, and I think the wrong one; recording and
 surfacing is both more honest and strictly more available.
@@ -132,7 +134,7 @@ Tracing each arrival through the worker (store → guard state → late check):
 `vibration 91.38 @ T+5` · `temperature 98.03 @ T+2` · `status 11.98 @ T+0`
 (the event-time maximum of each metric, i.e. the first arrivals win here);
 late ledger 3 rows (#2, #3, #5); both gateways reconciling, badges clearing
-60 s after their last late detection.
+when each gateway's next reading lands after 60 quiet seconds.
 
 **Verification (actual run):** 6 history rows · late ledger 3 · device
 `trace-device-6462` registered once, first gateway `gw-a-drtclem` · state

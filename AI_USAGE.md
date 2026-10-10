@@ -18,12 +18,14 @@ was also drafted by the agent and approved by Taylor before implementation.
 - the deliverable target (GitHub repository, demo video, scenario runs).
 
 **Human-provided inputs:** the take-home brief, the design reference link,
-and (pending) the `telemetry_generator.py` script — the build environment
-cannot access the private reference, so generator-scenario runs and the
-personalized `--seed drtclem` trace validation are performed once that script
-is provided.
+and `telemetry_generator.py` (uploaded 2026-10-10, included in the repo
+verbatim and excluded from lint). All four generator scenarios were run
+against the live compose stack; the seeded `--scenario trace --seed drtclem`
+sequence was traced by hand in DESIGN.md *before* being sent, and the actual
+run matched the trace on every point (6 history rows, 3 late flags, state
+vibration 91.38 / temperature 98.03 / status 11.98).
 
 **Verification:** every claim in this repo about correctness is backed by a
-test in `tests/test_invariants.py` (8 tests, real Postgres + Redis) and a
+test in `tests/test_invariants.py` (9 tests, real Postgres + Redis) and a
 GitHub Actions workflow running them on every push. No scenario results are
 claimed that were not run.

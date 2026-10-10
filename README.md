@@ -15,6 +15,14 @@ consumer applies them to Postgres under three hard invariants:
 3. **A device registers exactly once**, even when two gateways first-report it
    concurrently — the primary key arbitrates.
 
+## Demo video
+
+**[docs/demo-video.mp4](docs/demo-video.mp4)** — a 5-minute walkthrough:
+clean compose boot from a fresh checkout, all four generator scenarios run
+live (clean / replay / registration race with a dashboard claim / the seeded
+`drtclem` trace), the late-arrival badge lifecycle, the raw API contract
+(claim idempotency, validation rejection), and the hand-trace in DESIGN.md.
+
 ## Run it
 
     docker compose up --build
