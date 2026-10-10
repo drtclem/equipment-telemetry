@@ -1,0 +1,61 @@
+# Equipment Telemetry Ingestion
+
+Queue-backed ingestion for building-commissioning gateways. Gateways (and the
+provided `telemetry_generator.py`) POST readings to the API; a Redis Streams
+consumer applies them to Postgres under three hard invariants:
+
+1. **No reading is duplicated or lost.** Re-sent readings collapse to exactly
+   one history row via `UNIQUE (gateway_id, device_id, metric, sequence)`.
+   The queue is at-least-once; the database is exactly-once.
+2. **Current state is the true newest reading by event time.** A guarded
+   upsert overwrites only on strictly newer `(event_time, sequence)`, so a
+   replayed backlog can never clobber newer data. Late arrivals are recorded
+   in a `late_readings` ledger and surfaced as dashboard badges — never
+   dropped, never blocking.
+3. **A device registers exactly once**, even when two gateways first-report it
+   concurrently — the primary key arbitrates.
+
+## Run it
+
+    docker compose up --build
+    # dashboard  ->  http://localhost:8000/
+    # health     ->  http://localhost:8000/healthz
+
+Feed a reading:
+
+    curl -X POST http://localhost:8000/ingest/readings \
+      -H 'content-type: application/json' \
+      -d '{"gateway_id":"gw-04","device_id":"chiller-2","metric":"temperature_c","value":71.4,"event_time":"2026-10-09T18:22:03Z","sequence":1041}'
+
+## Generator scenarios (provided script)
+
+    docker compose up -d postgres redis api worker
+    python -m pip install requests
+    python telemetry_generator.py --scenario clean
+    python telemetry_generator.py --scenario backlog
+    python telemetry_generator.py --scenario race
+    python telemetry_generator.py --scenario trace --seed drtclem
+
+(Scenario names and flags follow the provided generator script; see
+DESIGN.md "Seeded trace" for what each demonstrates.)
+
+## Tests
+
+    python -m pip install -r requirements.txt
+    pytest -q    # needs Postgres + Redis (see .env.example); CI runs both as services
+
+The suite (tests/test_invariants.py) targets the invariants as properties:
+re-send deduplication, replay-vs-realtime ordering in both arrival orders,
+concurrent registration, crash-redelivery recovery, and a boot smoke test
+covering the API surfaces and the dashboard page.
+
+## Layout
+
+    api/         FastAPI service — ingest, devices, claim, stats, health + dashboard host
+    worker/      Redis Streams consumer — idempotent apply, XACK, XAUTOCLAIM recovery
+    dashboard/   static live view — vanilla JS, polls every 2 s
+    migrations/  SQL schema — each invariant enforced by a constraint
+    tests/       invariant tests against real Postgres + Redis
+
+More docs: DESIGN.md (design and the late-data call), CUTS.md (what was cut
+and why), AI_USAGE.md (what was AI-built and what was human).
