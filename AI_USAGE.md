@@ -33,7 +33,9 @@ Claude` trailer). Problems found by running the system, not by reading it:
   connection-lost banner on the dashboard
 
 The decisions behind each change, including the options rejected, are what
-DESIGN.md argues.
+DESIGN.md argues. Claude also turned our running decision log into
+DECISIONS.md (with diagrams), wrote the README's step-by-step run instructions,
+and trimmed DESIGN.md to two pages.
 
 ## Verification
 
