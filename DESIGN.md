@@ -91,7 +91,7 @@ isn't guaranteed gapless, we can't reliably detect that loss.
 
 ## Seeded trace (`--scenario trace --seed drtclem`)
 
-Device `trace-device-6462`; times relative to base T; arrival order is row
+Device `trace-device-6462` (gw-a/gw-b = `gw-a-drtclem`/`gw-b-drtclem`); times relative to base T; arrival order is row
 order; the last row is a byte-identical resend of #2.
 
 | # | gateway | metric | value | event time | stored? | state after | late? |

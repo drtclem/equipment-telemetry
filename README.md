@@ -11,26 +11,47 @@ Redis stream; two workers apply them to Postgres, where constraints enforce:
    can never overwrite newer data; broken-clock readings are quarantined.
 3. **A new device registers exactly once**, even when two gateways race.
 
-Design and the late-data decision: [DESIGN.md](DESIGN.md) · what's left out:
+Design and the late-data decision: [DESIGN.md](DESIGN.md) · every decision
+with diagrams: [DECISIONS.md](DECISIONS.md) · what's left out:
 [CUTS.md](CUTS.md) · AI disclosure: [AI_USAGE.md](AI_USAGE.md)
 
-**Demo video:** _link added on submission_
+**Demo video:** https://www.loom.com/share/98e1479b0dbf4fb083af88001098bc6a
 
-## Run it
+## Run it on your own machine
 
-From a clean checkout (Docker with Compose v1 or v2):
+The whole system, including the web app, runs locally. There is no hosted
+deployment; nothing needs an account, a key, or a paid service.
 
-    docker-compose up --build        # or: docker compose up --build
+**You need:** Docker with Compose (Docker Desktop, or Docker Engine plus the
+Compose plugin), Python 3.8+ for the generator, and port 8000 free.
 
-- Dashboard: http://localhost:8000/
-- Health: http://localhost:8000/healthz
+1. **Get the code.**
 
-Starts Postgres, Redis (append-only, fsync on every write), the API, and two
-workers. Schema migrations apply automatically on startup.
+       git clone <this repository's URL> equipment-telemetry
+       cd equipment-telemetry
+
+2. **Start everything** (Postgres, Redis, the API + dashboard, two workers):
+
+       docker-compose up --build        # Compose v2: docker compose up --build
+
+   The first build takes a minute or two. It's ready when the logs show
+   `Uvicorn running on http://0.0.0.0:8000`; schema migrations apply
+   automatically. Check with `curl http://localhost:8000/healthz` →
+   `{"status":"ok"}`.
+
+3. **Open the web app:** http://localhost:8000/ — the live equipment view, and
+   the unregistered-devices list with a **Claim** button. It's empty until
+   readings arrive.
+
+4. **Send data** from a second terminal in the same folder (next section). The
+   dashboard updates every 2 seconds.
+
+5. **Stop:** `Ctrl+C`, or `docker-compose down`. To start over with an empty
+   database: `docker-compose down -v`.
 
 ## Run the generator scenarios
 
-The provided simulator uses only the Python standard library:
+The provided simulator uses only the Python standard library (no install):
 
     python3 telemetry_generator.py --target http://localhost:8000 --scenario clean
     python3 telemetry_generator.py --target http://localhost:8000 --scenario replay
